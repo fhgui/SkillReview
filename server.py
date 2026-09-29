@@ -11,7 +11,9 @@ import json
 import mimetypes
 import os
 import re
+import html as htmllib
 import secrets
+import socket
 import socketserver
 import sys
 import threading
@@ -27,6 +29,8 @@ APP_DIR = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, APP_DIR)
 
 from agents import ROUTES, Runner  # noqa: E402
+from network import COOKIE, Network  # noqa: E402
+from picker import Busy, pick_skill_md  # noqa: E402
 from provenance import Provenance  # noqa: E402
 from registry import Registry, norm_dir  # noqa: E402
 from skillparse import text_hash  # noqa: E402
@@ -48,6 +52,10 @@ class App:
         self.token = secrets.token_urlsafe(24)
         self.registry = Registry(DATA_DIR, SKILLS_ROOT)
         self.registry.first_run()
+        self.net = Network(self.registry)
+        self.sharing = False  # listening on the network right now (main() binds per self.net.wanted)
+        self.httpd = None
+        self.rebind = False
         self.stores = {}
         self.stores_lock = threading.RLock()
         self.prov = Provenance(DATA_DIR, PROJECTS, SKILLS_ROOT)
@@ -177,9 +185,24 @@ class App:
             out.append(item)
         return out
 
-    def boot(self):
+    def boot(self, remote=False):
         return {'open': self.open_view(), 'settings': self.registry.settings(), 'routes': ROUTES,
-                'agent': self.runner.agent_status, 'skills_root': SKILLS_ROOT, 'data_dir': DATA_DIR}
+                'agent': self.runner.agent_status, 'skills_root': SKILLS_ROOT, 'data_dir': DATA_DIR,
+                'remote': remote, 'sharing': self.sharing}
+
+    # ---- sharing on the network ----
+    def share_view(self):
+        return {'on': self.sharing, 'wanted': self.net.wanted, 'error': self.net.error, 'port': self.port,
+                'urls': self.net.urls(self.port) if self.sharing else [], 'code': self.net.code if self.sharing else '',
+                'devices': self.net.devices(), 'pc': socket.gethostname()}
+
+    def set_sharing(self, on):
+        """Re-opens the listener on the network (or back on this PC only) in place; main() does the binding."""
+        self.net.set_wanted(on)
+        if bool(on) != self.sharing and self.httpd:
+            self.rebind = True
+            httpd = self.httpd
+            threading.Thread(target=lambda: (time.sleep(0.3), httpd.shutdown()), daemon=True).start()
 
     def version(self, sid):
         stv = 0
@@ -188,7 +211,7 @@ class App:
             self.auto_sync(st)
             stv = st.version
         return {'v': f'{self.registry.version}.{stv}', 'open': self.open_view(), 'running': self.runner.running(),
-                'agent': self.runner.agent_status,
+                'agent': self.runner.agent_status, 'sharing': self.sharing,
                 'history': {'busy': self.prov_busy, 'status': self.prov.status, 'ready': self.prov.built_for >= 0}}
 
     def _elsewhere(self, sid):
@@ -310,19 +333,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, code, body, ctype='application/json; charset=utf-8'):
+    def _send(self, code, body, ctype='application/json; charset=utf-8', headers=None):
         data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
-    def _host_ok(self):
-        host = (self.headers.get('Host') or '').lower()
-        return host in (f'127.0.0.1:{self.app.port}', f'localhost:{self.app.port}')
+    def _redirect(self, where, headers=None):
+        self._send(303, b'', 'text/plain; charset=utf-8', dict(headers or {}, Location=where))
 
     def _body(self):
         n = int(self.headers.get('Content-Length') or 0)
@@ -335,31 +360,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._dispatch('POST')
 
     def _dispatch(self, method):
-        if not self._host_ok():
+        a = self.app
+        host = self.headers.get('Host') or ''
+        if not a.net.host_ok(host, a.port, a.sharing):
             return self._send(403, {'error': 'Forbidden host'})
+        # this PC itself never needs the access code; other PCs only get in while sharing, and signed in
+        self.local = self.client_address[0] in ('127.0.0.1', '::1')
+        if not self.local and not a.sharing:
+            return self._send(403, {'error': 'Skill Review is not shared on the network.'})
+        if method == 'POST':  # browsers send the page's own origin: a page on another site can't post here
+            origin = self.headers.get('Origin')
+            if origin and origin.lower() != f'http://{host.lower()}':
+                return self._send(403, {'error': 'Bad origin'})
         url = urllib.parse.urlparse(self.path)
         path, qs = url.path, dict(urllib.parse.parse_qsl(url.query))
         try:
             if path == '/api/ping':
                 return self._send(200, {'app': 'skill-review'})
+            if path in ('/login', '/logout'):
+                return self._login(method, path)
+            if not self.local and not a.net.session(self.headers.get('Cookie'), self.client_address[0]):
+                if path.startswith('/api/'):
+                    return self._send(401, {'error': 'Sign in again.', 'login': True})
+                if path == '/static/icon.ico':
+                    return self._static(path)
+                return self._redirect('/login')
             if not path.startswith('/api/'):
                 return self._static(path)
-            if self.headers.get('X-Token') != self.app.token:
+            if self.headers.get('X-Token') != a.token:
                 return self._send(403, {'error': 'Bad token. Reload the page.'})
-            if method == 'POST':
-                origin = self.headers.get('Origin')
-                if origin and origin not in (f'http://127.0.0.1:{self.app.port}', f'http://localhost:{self.app.port}'):
-                    return self._send(403, {'error': 'Bad origin'})
             body = self._body() if method == 'POST' else {}
             m = re.match(r'^/api/s/([^/]+)(/.*)$', path)
             if m:
                 return self._send(200, self._skill_api(method, urllib.parse.unquote(m.group(1)), m.group(2), qs, body))
             return self._send(200, self._api(method, path, qs, body))
+        except PermissionError as e:
+            return self._send(403, {'error': str(e)})
         except ValueError as e:
             return self._send(400, {'error': str(e)})
         except Exception as e:
             traceback.print_exc()
             return self._send(500, {'error': f'{type(e).__name__}: {e}'})
+
+    def _login(self, method, path):
+        a = self.app
+        if path == '/logout':
+            a.net.logout(self.headers.get('Cookie'))
+            return self._redirect('/login', {'Set-Cookie': f'{COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict'})
+        if self.local:
+            return self._redirect('/')  # this PC never needs the code
+        if method == 'GET':
+            if a.net.session(self.headers.get('Cookie')):
+                return self._redirect('/')
+            return self._send(200, login_page(), 'text/html; charset=utf-8')
+        n = min(int(self.headers.get('Content-Length') or 0), 4096)
+        form = dict(urllib.parse.parse_qsl(self.rfile.read(n).decode('utf-8', 'replace'))) if n else {}
+        token, err = a.net.login(self.client_address[0], form.get('code'), self.headers.get('User-Agent'))
+        if err:
+            return self._send(401, login_page(err), 'text/html; charset=utf-8')
+        cookie = f'{COOKIE}={token}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict'
+        return self._redirect('/', {'Set-Cookie': cookie})
 
     def _static(self, path):
         if path in ('/', '/index.html'):
@@ -428,6 +488,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _api(self, method, path, qs, body):
         a = self.app
+        if not self.local and (path.startswith('/api/share') or (method == 'POST' and path in HOST_ONLY)):
+            raise PermissionError('Only the PC running Skill Review can change this.')
+        if path == '/api/share':
+            if method == 'POST':
+                a.set_sharing(bool(body.get('on')))
+                return {'ok': True, 'wanted': a.net.wanted}
+            return a.share_view()
+        if path == '/api/share/code' and method == 'POST':
+            a.net.renew_code()
+            return a.share_view()
         m = re.match(r'^/api/edit/(\d+)/context$', path)
         if m:
             ctx = a.prov.context(int(m.group(1)))
@@ -435,7 +505,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError('Unknown edit')
             return ctx
         if path == '/api/boot':
-            return a.boot()
+            return a.boot(remote=not self.local)
         if path == '/api/version':
             return a.version(qs.get('skill'))
         if path == '/api/skills/available':
@@ -445,6 +515,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not d:
                 raise ValueError('Give a folder that contains a SKILL.md.')
             return {'id': a.open_skill(os.path.expandvars(os.path.expanduser(d)))}
+        if path == '/api/skills/browse' and method == 'POST':
+            if not self.local:
+                raise PermissionError('Browse opens a window on the PC running Skill Review, so it only works there. '
+                                      'Paste the folder path instead.')
+            try:
+                chosen = pick_skill_md(SKILLS_ROOT)
+            except Busy as e:
+                raise ValueError(str(e))
+            except ImportError:
+                raise ValueError("Browsing isn't available on this computer. Paste the folder path instead.")
+            if not chosen:
+                return {'cancelled': True}
+            return {'id': a.open_skill(chosen), 'path': chosen}
         if path == '/api/skills/close' and method == 'POST':
             a.close_skill(body['id'])
             return {'ok': True}
@@ -463,6 +546,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             threading.Thread(target=lambda: (time.sleep(0.3), os._exit(0)), daemon=True).start()
             return {'ok': True}
         raise ValueError(f'No such endpoint: {method} {path}')
+
+
+# changes other PCs may not make: settings (the Claude Code program path runs as a program on this PC), stopping the
+# app (nobody could start it again from there); /api/share is refused to them altogether (it shows the code)
+HOST_ONLY = ('/api/settings', '/api/shutdown')
+
+LOGIN_CSS = """
+:root { color-scheme: dark; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #161514; color: #ecebe8;
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { width: min(380px, calc(100vw - 32px)); background: #1f1e1c; border: 1px solid #34322f; border-radius: 12px;
+  padding: 26px 24px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+h1 { font-size: 19px; margin: 0 0 4px; } p { margin: 0 0 14px; color: #b5b2ac; font-size: 14px; }
+label { display: block; font-size: 13px; color: #b5b2ac; margin-bottom: 6px; }
+input { box-sizing: border-box; width: 100%; font: 600 20px/1.2 ui-monospace, Consolas, monospace; letter-spacing: .08em;
+  text-transform: uppercase; padding: 10px 12px; border-radius: 8px; border: 1px solid #45423e; background: #161514;
+  color: #ecebe8; }
+input:focus { outline: 2px solid #7c8cff; outline-offset: 1px; }
+button { margin-top: 14px; width: 100%; padding: 10px; border: 0; border-radius: 8px; background: #7c8cff; color: #10121f;
+  font: 600 15px system-ui, sans-serif; cursor: pointer; }
+.err { color: #ff8f8f; margin: 12px 0 0; }
+"""
+
+
+def login_page(error=''):
+    pc = htmllib.escape(socket.gethostname())
+    err = f'<p class="err">{htmllib.escape(error)}</p>' if error else ''
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>Sign in - Skill Review</title><link rel="icon" href="/static/icon.ico"><style>{LOGIN_CSS}</style>'
+            f'</head><body><main><h1>Skill Review on {pc}</h1>'
+            f'<p>Enter the access code shown on {pc} in Settings, under Other PCs on your network.</p>'
+            f'<form method="post" action="/login"><label for="code">Access code</label>'
+            f'<input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" '
+            f'placeholder="XXXX-XXXX-XXXX" autofocus required><button type="submit">Sign in</button>{err}'
+            f'</form></main></body></html>').encode('utf-8')
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -501,14 +620,42 @@ def main():
         return
     app = App(args.port)
     Handler.app = app
-    httpd = Server(('127.0.0.1', args.port), Handler)
-    print(f'Skill Review running at {url}  (Ctrl+C to stop)')
-    if args.open:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    first = True
+    while True:  # one pass per listener: turning network sharing on or off re-opens it (App.set_sharing)
+        app.httpd = bind(app, args.port)
+        if first:
+            print(f'Skill Review running at {url}  (Ctrl+C to stop)')
+            if args.open:
+                threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+            first = False
+        try:
+            app.httpd.serve_forever()
+        except KeyboardInterrupt:
+            break
+        finally:
+            app.httpd.server_close()
+        if not app.rebind:
+            break
+        app.rebind = False
+
+
+def bind(app, port):
+    """Listens on every IPv4 address of this PC while sharing, else on 127.0.0.1 only. If the network listener can't
+    open, it stays on this PC only and Settings shows why."""
+    want = app.net.wanted
+    last = None
+    for _ in range(20):  # the port can take a moment to come free after the previous listener closes
+        for host in (('0.0.0.0', '127.0.0.1') if want else ('127.0.0.1',)):
+            try:
+                httpd = Server((host, port), Handler)
+            except OSError as e:
+                last = e
+                continue
+            app.sharing = host == '0.0.0.0'
+            app.net.error = '' if app.sharing or not want else f"Couldn't open port {port} to the network: {last}"
+            return httpd
+        time.sleep(0.25)
+    raise last
 
 
 if __name__ == '__main__':

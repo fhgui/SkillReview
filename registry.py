@@ -144,8 +144,8 @@ class Registry:
 
     def open(self, d):
         d = os.path.normpath(os.path.abspath(d))
-        if os.path.basename(d).lower() == 'skill.md':
-            d = os.path.dirname(d)
+        if os.path.basename(d).lower() == 'skill.md' or (os.path.isfile(d) and d.lower().endswith('.md')):
+            d = os.path.dirname(d)  # a skill's SKILL.md, or another .md file beside it
         if not os.path.isfile(os.path.join(d, 'SKILL.md')):
             raise ValueError(f'No SKILL.md in {d}')
         for r in self.open_list():

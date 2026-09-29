@@ -18,6 +18,18 @@ Reviewing, approving and denying work without it.
 (Windows), or `py server.py --open` / `python3 server.py --open`. It opens http://127.0.0.1:8765 in your browser
 and only listens on your own computer. Run from source, the data lives in `data/` next to the code.
 
+## Use it from another PC
+
+In **Settings > Other PCs on your network**, click **Share on my network**. Settings then shows the address to
+open on the other PC (like `http://192.168.1.100:8765`) and an access code; the other PC signs in with it once and
+stays signed in. **New code** signs every other PC out; **Stop sharing** puts it back to this PC only.
+
+- The first time, Windows asks whether to allow Skill Review (or Python) through the firewall: allow it on
+  **Private** networks, and set your home network to Private (Windows Settings > Network & internet > your
+  network > Network profile type). A VPN (e.g. Mullvad) needs local network sharing turned on.
+- Other PCs can review, ask and refine, but can't change Settings or stop the app, and never see the code.
+- It's plain HTTP, meant for your home network: don't share it on public Wi-Fi.
+
 ## Your data stays on your computer
 
 Everything the app records lives in its data folder (`data/` next to the code, or `%LOCALAPPDATA%\SkillReview`
@@ -29,7 +41,8 @@ its own login. From Claude Code's settings file it reads only the list of your p
 
 Each open skill is a tab along the top; switch with a click or `[` / `]`. **Add skill** (`+`) searches every
 skill on this computer (your `~/.claude/skills`, project `.claude/skills` folders, installed plugins and
-scheduled tasks), or opens any folder that has a `SKILL.md`. Closing a tab keeps its votes; reopening it brings
+scheduled tasks). If yours isn't listed, **Browse…** opens the Windows Open window: go to the skill's
+folder and pick its `SKILL.md` (or paste the folder's path). Closing a tab keeps its votes; reopening it brings
 them back.
 
 Every skill has its own database, and every list shows one skill at a time. For a skill with several files,
@@ -87,12 +100,13 @@ In `data/` (the exe: `%LOCALAPPDATA%\SkillReview`):
 
 ## Making a release
 
-Push a version tag and GitHub builds the exe and publishes the release
+Update "What's new" in [.github/release-notes.md](.github/release-notes.md), commit and push, then push a
+version tag: GitHub builds the exe and publishes the release
 ([.github/workflows/release.yml](.github/workflows/release.yml)):
 
 ```
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 To build the exe yourself: `python -m pip install -r requirements-build.txt`, then `python build.py`. It lands in

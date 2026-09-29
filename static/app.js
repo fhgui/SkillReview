@@ -22,6 +22,7 @@ async function api(path, body) {
   const r = await fetch(path, opts);
   let j = null;
   try { j = await r.json(); } catch (e) { /* empty */ }
+  if (r.status === 401 && j && j.login) { location.href = '/login'; }
   if (r.status === 403 && j && /token/i.test(j.error || '')) {
     // the app was restarted and issued a new token: reload once to pick it up
     let last = 0;
@@ -355,8 +356,9 @@ async function addSkillModal() {
   modal(`<h3>Open a skill</h3>
     <label class="search" style="max-width:none">${icon('search')}<input id="skillSearch" type="search" placeholder="Search by name, description, project or folder" autocomplete="off"></label>
     <div id="skillList" class="avlist"><div class="working" style="padding:14px"><span class="spin"></span>Looking for skills on this computer…</div></div>
-    <div class="field"><label for="skillPath">Or open any folder that has a SKILL.md</label>
-      <div class="compose-row"><input id="skillPath" type="text" placeholder="C:\\path\\to\\my-skill" autocomplete="off" style="flex:1;border:1px solid var(--line-2);background:var(--panel-2);border-radius:8px;padding:6px 9px"><button class="btn" data-act="open-path">Open folder</button></div></div>
+    <div class="field"><label for="skillPath">Not in the list? Find it yourself</label>
+      <div class="compose-row">${S.boot && S.boot.remote ? '' : `<button class="btn primary" data-act="browse-skill" title="Opens the Windows Open window on this PC">${icon('search')}Browse…</button>`}<input id="skillPath" type="text" placeholder="or paste the skill's folder or SKILL.md path" autocomplete="off" style="flex:1;border:1px solid var(--line-2);background:var(--panel-2);border-radius:8px;padding:6px 9px"><button class="btn" data-act="open-path">Open</button></div>
+      <div class="help">${S.boot && S.boot.remote ? 'Browse only works on the PC running Skill Review. Paste the path of the skill folder on that PC.' : 'Browse opens the Windows Open window: go to the skill\'s folder and pick its SKILL.md.'}</div></div>
     <div class="foot"><button class="btn" data-act="close-modal">Close</button></div>`, 'wide');
   setTimeout(() => $('#skillSearch') && $('#skillSearch').focus(), 0);
   try { S.available = await api('/api/skills/available'); } catch (e) { S.available = []; toastErr(e); }
@@ -404,6 +406,16 @@ async function closeSkill(id) {
     if (S.skill === id) await switchSkill((S.open[idx] || S.open[idx - 1] || {}).id || null);
     else renderSkillTabs();
   } catch (e) { toastErr(e); }
+}
+
+// "On network" while other PCs may sign in; "Remote" when this page is itself on another PC
+function renderNet() {
+  const pill = $('#netPill'); if (!pill) return;
+  const remote = S.boot && S.boot.remote;
+  pill.hidden = !(remote || S.sharing);
+  pill.textContent = remote ? 'Remote' : 'On network';
+  pill.title = remote ? 'You are using Skill Review on another PC. Click for settings or to sign out.'
+    : 'Other PCs on your network can sign in with the access code. Click to see it or stop sharing.';
 }
 
 function renderAgent() {
@@ -1127,16 +1139,56 @@ function agentModal() {
     <div class="foot"><button class="btn" data-act="close-modal">Close</button><button class="btn primary" data-act="agent-check">Check again</button></div>`);
 }
 
+function netSection(sh) {
+  const help = `If the other PC can't connect: when Windows asks, allow Skill Review (or Python) on <b>Private</b> networks,
+    and check this network is set to Private in Windows settings. A VPN (e.g. Mullvad) needs local network sharing turned on.`;
+  if (!sh.on) {
+    return `<div class="field"><label>Other PCs on your network</label>
+      ${sh.error ? `<div class="info-box" style="margin-bottom:8px">${esc(sh.error)}</div>` : ''}
+      <div class="help" style="margin:0 0 8px">Open Skill Review from another PC on your home network. It signs in once with an access code shown here; this PC never needs it.</div>
+      <button class="btn" data-act="share-on">Share on my network</button></div>`;
+  }
+  const urls = sh.urls.length ? sh.urls : [`http://${sh.pc}:${sh.port}/`];
+  const devices = sh.devices.length
+    ? sh.devices.map((d) => `<li>${esc(d.browser)} at ${esc(d.ip)} · last used ${esc(when(d.last_seen).main)}</li>`).join('')
+    : '<li>No other PC has signed in yet.</li>';
+  return `<div class="field"><label>Other PCs on your network</label><div class="net-box">
+    <div>On the other PC, open <code>${esc(urls[0])}</code>${urls.length > 1 ? `<div class="help">This PC's other addresses, if that one doesn't work: ${urls.slice(1).map((u) => esc(u)).join(', ')}</div>` : ''}</div>
+    <div class="net-code">Access code <code class="big">${esc(sh.code)}</code><button class="btn" data-act="share-code" title="Signs out every other PC">New code</button></div>
+    <ul class="net-devices">${devices}</ul>
+    <div class="help">${help}</div>
+    <button class="btn" data-act="share-off">Stop sharing</button></div></div>`;
+}
+
+// turning sharing on or off re-opens the app's listener: wait until it answers in the new state
+async function setSharing(on) {
+  try { await api('/api/share', { on }); } catch (e) { toastErr(e); return; }
+  let sh = null;
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try { sh = await api('/api/share'); if (sh.on === on || sh.error) break; } catch (e) { /* re-opening */ }
+  }
+  if (sh) S.sharing = sh.on;
+  renderNet();
+  settingsModal();
+  if (sh && sh.on) toast('Shared on your network. If Windows asks, allow it on Private networks.');
+  else if (sh && !on) toast('Stopped sharing. Only this PC can open it now.');
+}
+
 function settingsModal() {
-  api('/api/settings').then((st) => {
+  const remote = !!(S.boot && S.boot.remote);
+  Promise.all([api('/api/settings'), remote ? null : api('/api/share')]).then(([st, sh]) => {
+    const dis = remote ? 'disabled' : '';
     const models = ['opus', 'sonnet', 'haiku'];
     const roles = [['router', 'Auto router'], ...ROUTE_ORDER.slice(1).map((k) => [k, S.boot.routes[k].label])];
     modal(`<h3>Settings</h3>
-      <div class="field"><label>Model for each agent</label><div class="grid2">${roles.map(([k, label]) => `<div><div class="muted" style="font-size:12px">${esc(label)}</div><select data-model="${k}">${models.map((m) => `<option ${st.models[k] === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>`).join('')}</div></div>
-      <div class="field"><label for="budget">Spending cap per request (USD)</label><input id="budget" type="number" min="0" step="0.5" value="${esc(st.max_budget_usd)}"><div class="help">Claude stops a single request once it has used this much. 0 means no cap.</div></div>
-      <div class="field"><label for="claudePath">Claude Code program</label><input id="claudePath" type="text" value="${esc(st.claude_path)}" placeholder="${esc((S.agent && S.agent.exe) || 'auto-detect')}"><div class="help">Leave empty to use the newest one found automatically.</div></div>
-      <div class="field"><label for="readDirs">Folders agents may read for context</label><textarea id="readDirs" rows="3">${esc((st.read_dirs || []).join('\n'))}</textarea><div class="help">One per line. Read-only agents can look here; editing agents can only change files in the skills folder the skill lives in.</div></div>
-      <div class="foot"><button class="btn" data-act="reindex">Rebuild history index</button><button class="btn bad" data-act="shutdown">Stop the app</button><div class="spacer"></div><button class="btn" data-act="close-modal">Cancel</button><button class="btn primary" data-act="save-settings">Save</button></div>`);
+      ${remote ? `<div class="info-box">You're on another PC. Settings can only be changed on the PC running Skill Review.</div>` : ''}
+      <div class="field"><label>Model for each agent</label><div class="grid2">${roles.map(([k, label]) => `<div><div class="muted" style="font-size:12px">${esc(label)}</div><select ${dis} data-model="${k}">${models.map((m) => `<option ${st.models[k] === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>`).join('')}</div></div>
+      <div class="field"><label for="budget">Spending cap per request (USD)</label><input id="budget" ${dis} type="number" min="0" step="0.5" value="${esc(st.max_budget_usd)}"><div class="help">Claude stops a single request once it has used this much. 0 means no cap.</div></div>
+      <div class="field"><label for="claudePath">Claude Code program</label><input id="claudePath" ${dis} type="text" value="${esc(st.claude_path)}" placeholder="${esc((S.agent && S.agent.exe) || 'auto-detect')}"><div class="help">Leave empty to use the newest one found automatically.</div></div>
+      <div class="field"><label for="readDirs">Folders agents may read for context</label><textarea id="readDirs" ${dis} rows="3">${esc((st.read_dirs || []).join('\n'))}</textarea><div class="help">One per line. Read-only agents can look here; editing agents can only change files in the skills folder the skill lives in.</div></div>
+      ${remote ? '' : netSection(sh)}
+      <div class="foot"><button class="btn" data-act="reindex">Rebuild history index</button>${remote ? '<a class="btn" href="/logout">Sign out this PC</a>' : '<button class="btn bad" data-act="shutdown">Stop the app</button>'}<div class="spacer"></div><button class="btn" data-act="close-modal">${remote ? 'Close' : 'Cancel'}</button>${remote ? '' : '<button class="btn primary" data-act="save-settings">Save</button>'}</div>`);
   }).catch(toastErr);
 }
 
@@ -1160,6 +1212,15 @@ document.addEventListener('click', async (ev) => {
     case 'close-skill': ev.stopPropagation(); await closeSkill(t.dataset.skill); break;
     case 'add-skill': await addSkillModal(); break;
     case 'open-skill': await openSkill(t.dataset.dir); break;
+    case 'browse-skill': {
+      const label = t.innerHTML; t.disabled = true; t.textContent = 'Pick the SKILL.md in the Open window…';
+      try {
+        const res = await api('/api/skills/browse', {});
+        if (res.cancelled) break;
+        closeModal(); await pollNow(); await switchSkill(res.id); toast(`Opened ${skillName(res.id)}`);
+      } catch (e) { toastErr(e); } finally { t.disabled = false; t.innerHTML = label; }
+      break;
+    }
     case 'open-path': { const v = $('#skillPath').value.trim(); if (v) await openSkill(v); else $('#skillPath').focus(); break; }
     case 'filter': S.filter = t.dataset.filter; prefs.set('filter', S.filter); render(); break;
     case 'focus': setFocus(id, false); break;
@@ -1215,6 +1276,13 @@ document.addEventListener('click', async (ev) => {
     case 'close-modal': closeModal(); break;
     case 'confirm-ok': { const r = confirmResolve; confirmResolve = null; closeModal(); if (r) r(true); break; }
     case 'save-settings': await saveSettings(); break;
+    case 'share-on': t.disabled = true; await setSharing(true); break;
+    case 'share-off': t.disabled = true; await setSharing(false); break;
+    case 'share-code':
+      if (await askConfirm('Make a new access code? Every other PC is signed out and needs the new code.', 'New code')) {
+        try { await api('/api/share/code', {}); settingsModal(); toast('New code made. Other PCs are signed out.'); } catch (e) { toastErr(e); }
+      }
+      break;
     case 'reindex': await api('/api/history/reindex', {}); toast('Rebuilding the history index in the background'); break;
     case 'shutdown': if (await askConfirm('Stop the Skill Review app? Start it again the way you opened it (SkillReview.exe or your shortcut).', 'Stop the app')) { await api('/api/shutdown', {}); document.body.innerHTML = '<div class="empty"><h3>Skill Review stopped</h3><p>Start it again the way you opened it (SkillReview.exe or your shortcut).</p></div>'; } break;
     default: break;
@@ -1235,6 +1303,7 @@ $('#skillTabs').addEventListener('wheel', (ev) => {
   if (el.scrollWidth > el.clientWidth && Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) { el.scrollLeft += ev.deltaY; ev.preventDefault(); }
 }, { passive: false });
 $('#settingsBtn').addEventListener('click', settingsModal);
+$('#netPill').addEventListener('click', settingsModal);
 
 // Hovering a rule makes it the one the keyboard shortcuts act on, and it stays highlighted after the pointer
 // leaves. Only real pointer movement counts: j/k and the wheel scroll rules under a still pointer, and that must
@@ -1290,8 +1359,8 @@ document.addEventListener('keydown', async (ev) => {
 let pollTimer = null;
 async function pollNow() {
   const v = await api(`/api/version?skill=${encodeURIComponent(S.skill || '')}`);
-  S.open = v.open; S.agent = v.agent; S.running = v.running; S.history = v.history;
-  renderSkillTabs(); renderAgent(); renderTabs();
+  S.open = v.open; S.agent = v.agent; S.running = v.running; S.history = v.history; S.sharing = v.sharing;
+  renderSkillTabs(); renderAgent(); renderTabs(); renderNet();
   return v;
 }
 async function poll(soon) {
@@ -1316,7 +1385,7 @@ async function poll(soon) {
 (async function start() {
   try {
     S.boot = await api('/api/boot');
-    S.agent = S.boot.agent;
+    S.agent = S.boot.agent; S.sharing = S.boot.sharing; renderNet();
     S.open = S.boot.open;
     const [hs, ht] = parseHash();
     const ids = S.open.map((x) => x.id);
