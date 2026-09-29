@@ -28,7 +28,7 @@ DEFAULT_SETTINGS = {
                'architect': 'opus', 'advisor': 'sonnet'},
     'max_budget_usd': 3.0,
     'claude_path': '',
-    'read_dirs': [os.path.expanduser(r'~\Documents\Roblox')],
+    'read_dirs': [],  # extra folders the agents may read (Settings)
 }
 
 HOME = os.path.expanduser('~')

@@ -2,19 +2,26 @@
 
 A local web app for reviewing the rules in your Claude Code skills one by one.
 
-## Getting started
+## Download (Windows)
 
-- **Python 3** (tested with 3.13). It uses the standard library only, so there is nothing to install.
-- **Claude Code** (the `claude` command), logged in, for the Ask / Refine / Move agents. Reviewing works without
-  it.
+Get **SkillReview.exe** from the [latest release](../../releases/latest) and double-click it. It opens the app
+in your browser and keeps its data in `%LOCALAPPDATA%\SkillReview`. Windows may warn "Windows protected your PC"
+because the exe isn't code-signed: click **More info**, then **Run anyway**. Stop it from **Settings > Stop the
+app**.
 
-Run `start.bat` (Windows), or `py server.py --open` / `python3 server.py --open`. It opens
-http://127.0.0.1:8765 in your browser and only listens on your own computer.
+For the Ask / Refine / Move agents you need **Claude Code** (the `claude` command) installed and logged in.
+Reviewing, approving and denying work without it.
+
+## Run from source (any system)
+
+**Python 3** (tested with 3.13), standard library only, so there is nothing to install. Run `start.bat`
+(Windows), or `py server.py --open` / `python3 server.py --open`. It opens http://127.0.0.1:8765 in your browser
+and only listens on your own computer. Run from source, the data lives in `data/` next to the code.
 
 ## Your data stays on your computer
 
-Everything the app records lives in the `data/` folder next to it (see [Files](#files)). `.gitignore` keeps that
-folder out of git, because it holds your votes, copies of your skills and an index of your Claude Code
+Everything the app records lives in its data folder (`data/` next to the code, or `%LOCALAPPDATA%\SkillReview`
+for the exe; see [Files](#files)). `.gitignore` keeps `data/` out of git, because it holds your votes, copies of your skills and an index of your Claude Code
 transcripts. The app never reads or stores your Claude login: the agents run the `claude` command, which uses
 its own login. From Claude Code's settings file it reads only the list of your project folders.
 
@@ -70,8 +77,23 @@ The agents run `claude -p` on this computer. If the header says "Log in needed":
 
 ## Files
 
+In `data/` (the exe: `%LOCALAPPDATA%\SkillReview`):
+
 - `data/app.db`: which skills are open, and settings.
 - `data/skills/<skill>/review.db`: that skill's votes, removed rules, conversations and activity log.
 - `data/skills/<skill>/backups/`: copies of its files before each deny/restore, and snapshots before each
   agent edit.
 - `data/history.db`: the transcript index, shared by all skills (safe to delete; it rebuilds).
+
+## Making a release
+
+Push a version tag and GitHub builds the exe and publishes the release
+([.github/workflows/release.yml](.github/workflows/release.yml)):
+
+```
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+To build the exe yourself: `python -m pip install -r requirements-build.txt`, then `python build.py`. It lands in
+`dist/SkillReview.exe`.

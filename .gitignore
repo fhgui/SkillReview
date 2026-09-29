@@ -14,3 +14,8 @@ __pycache__/
 # Local secrets, if you ever add any
 .env
 .env.*
+
+# Build output (python build.py)
+build/
+dist/
+*.spec

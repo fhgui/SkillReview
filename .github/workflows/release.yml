@@ -1,0 +1,54 @@
+# Builds SkillReview.exe on GitHub's Windows machines and publishes it as a release whenever a version tag is
+# pushed:   git tag v1.2.0   then   git push origin v1.2.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # to create the release
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build SkillReview.exe
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-build.txt
+          python build.py
+
+      - name: Smoke test the exe
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'skillreview-data'
+          $p = Start-Process dist\SkillReview.exe -ArgumentList '--no-open', '--port', '8799', '--data', $data -PassThru
+          $ok = $false
+          foreach ($i in 1..60) {
+            try { if ((Invoke-RestMethod http://127.0.0.1:8799/api/ping).app -eq 'skill-review') { $ok = $true; break } } catch {}
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $ok) { throw 'The exe did not start' }
+          $page = (Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing).Content
+          if ($page -match '__TOKEN__') { throw 'The page was served without its token' }
+          $js = (Invoke-WebRequest http://127.0.0.1:8799/static/app.js -UseBasicParsing).StatusCode
+          if ($js -ne 200) { throw 'The bundled web files are missing' }
+          if (-not (Test-Path (Join-Path $data 'app.db'))) { throw 'No data was written' }
+          Stop-Process -Id $p.Id -Force
+          Get-Process SkillReview -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host 'The exe starts, serves the app and writes its data.'
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/SkillReview.exe \
+            --title "Skill Review $GITHUB_REF_NAME" \
+            --notes-file .github/release-notes.md

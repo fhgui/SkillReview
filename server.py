@@ -21,7 +21,9 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+FROZEN = getattr(sys, 'frozen', False)  # running as SkillReview.exe (the PyInstaller build)
+# the source folder; in the exe, the temporary folder PyInstaller unpacks the bundled files into
+APP_DIR = getattr(sys, '_MEIPASS', None) or os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 from agents import ROUTES, Runner  # noqa: E402
@@ -30,7 +32,10 @@ from registry import Registry, norm_dir  # noqa: E402
 from skillparse import text_hash  # noqa: E402
 from store import Store  # noqa: E402
 
-DATA_DIR = os.path.join(APP_DIR, 'data')
+# ./data next to the source. The exe keeps it in %LOCALAPPDATA%\SkillReview: its own folder may be Downloads or
+# read-only, and APP_DIR is deleted when it exits.
+DATA_DIR = (os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'SkillReview') if FROZEN
+            else os.path.join(APP_DIR, 'data'))
 STATIC = os.path.join(APP_DIR, 'static')
 SKILLS_ROOT = os.path.expanduser(os.path.join('~', '.claude', 'skills'))
 PROJECTS = os.path.expanduser(os.path.join('~', '.claude', 'projects'))
@@ -477,10 +482,13 @@ def main():
     global SKILLS_ROOT, DATA_DIR
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--port', type=int, default=8765)
-    ap.add_argument('--open', action='store_true', help='open the app in your browser')
+    ap.add_argument('--open', action='store_true', help='open the app in your browser (the exe always does)')
+    ap.add_argument('--no-open', action='store_true', help="don't open the browser, even from the exe")
     ap.add_argument('--skills-root', help='your personal skills folder (default ~/.claude/skills)')
-    ap.add_argument('--data', help='folder for the review databases and backups (default ./data)')
+    ap.add_argument('--data', help='folder for the review databases and backups '
+                                   r'(default ./data; the exe uses %%LOCALAPPDATA%%\SkillReview)')
     args = ap.parse_args()
+    args.open = (args.open or FROZEN) and not args.no_open  # double-clicking the exe opens the page
     if args.skills_root:
         SKILLS_ROOT = os.path.abspath(args.skills_root)
     if args.data:

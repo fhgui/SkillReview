@@ -1216,7 +1216,7 @@ document.addEventListener('click', async (ev) => {
     case 'confirm-ok': { const r = confirmResolve; confirmResolve = null; closeModal(); if (r) r(true); break; }
     case 'save-settings': await saveSettings(); break;
     case 'reindex': await api('/api/history/reindex', {}); toast('Rebuilding the history index in the background'); break;
-    case 'shutdown': if (await askConfirm('Stop the Skill Review app? Start it again from the desktop shortcut.', 'Stop the app')) { await api('/api/shutdown', {}); document.body.innerHTML = '<div class="empty"><h3>Skill Review stopped</h3><p>Start it again from the desktop shortcut.</p></div>'; } break;
+    case 'shutdown': if (await askConfirm('Stop the Skill Review app? Start it again the way you opened it (SkillReview.exe or your shortcut).', 'Stop the app')) { await api('/api/shutdown', {}); document.body.innerHTML = '<div class="empty"><h3>Skill Review stopped</h3><p>Start it again the way you opened it (SkillReview.exe or your shortcut).</p></div>'; } break;
     default: break;
   }
 });

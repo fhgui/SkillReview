@@ -237,10 +237,22 @@ class Runner:
 
     def check(self, settings):
         exe = find_claude(settings)
-        self.agent_status = {'ok': False, 'exe': exe, 'checked_at': now_iso(), 'message': ''}
+        # ok stays None (the header says "Checking agents…") until the test call answers, which takes seconds;
+        # the result replaces it in one go
+        self.agent_status = {'ok': None, 'exe': exe, 'checked_at': None, 'message': 'Checking…'}
+        try:
+            status = self._check(exe)
+        except Exception as e:  # never leave it on "Checking"
+            status = {'ok': False, 'exe': exe, 'message': f'The check failed: {e}'}
+        status['checked_at'] = now_iso()
+        self.agent_status = status
+        return status
+
+    def _check(self, exe):
+        st = {'ok': False, 'exe': exe, 'checked_at': None, 'message': ''}
         if not exe:
-            self.agent_status['message'] = 'Claude Code CLI not found. Install it, or set its path in Settings.'
-            return self.agent_status
+            st['message'] = 'Claude Code CLI not found. Install it, or set its path in Settings.'
+            return st
         try:
             r = subprocess.run(command(exe) + ['-p', '--model', 'haiku', '--output-format', 'json', '--tools', '',
                                                '--no-session-persistence', '--strict-mcp-config'],
@@ -253,16 +265,16 @@ class Runner:
                 j = {'is_error': True, 'result': (r.stdout or r.stderr or '').strip()[:400]}
             if j.get('is_error') or r.returncode:
                 msg = j.get('result') or r.stderr.strip()[:400] or 'Claude exited with an error.'
-                self.agent_status['message'] = msg
-                self.agent_status['needs_login'] = any(h in msg.lower() for h in AUTH_HINTS)
+                st['message'] = msg
+                st['needs_login'] = any(h in msg.lower() for h in AUTH_HINTS)
             else:
-                self.agent_status.update(ok=True, message='Connected')
+                st.update(ok=True, message='Connected')
         except subprocess.TimeoutExpired:
-            self.agent_status['message'] = 'Claude did not answer within 2 minutes (often an expired login).'
-            self.agent_status['needs_login'] = True
+            st['message'] = 'Claude did not answer within 2 minutes (often an expired login).'
+            st['needs_login'] = True
         except OSError as e:
-            self.agent_status['message'] = str(e)
-        return self.agent_status
+            st['message'] = str(e)
+        return st
 
     def job_view(self, sid, job):
         j = dict(job)
