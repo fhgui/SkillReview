@@ -1,0 +1,16 @@
+# Your own data: review databases, skill backups, the transcript index, settings and the log. Never upload.
+data/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Anything database- or log-like that ends up outside data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Local secrets, if you ever add any
+.env
+.env.*
